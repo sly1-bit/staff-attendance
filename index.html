@@ -92,6 +92,7 @@
   .roster-list{ list-style:none; margin:0; padding:0; border-top:1px solid var(--line); }
   .roster-list li{
     display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid var(--line);
+    flex-wrap:wrap;
   }
   .roster-list img{ width:42px; height:42px; object-fit:cover; border:1px solid var(--line); background:#eee; }
   .roster-list .who{ flex:1; }
@@ -158,11 +159,13 @@
   <div class="clock" id="clockDisplay">&nbsp;</div>
 </header>
 
-<nav class="tabs">
+<nav class="tabs" id="tabsNav">
   <button data-tab="checkin" class="active">Check in / out</button>
-  <button data-tab="roster">Staff roster</button>
-  <button data-tab="log">Attendance log</button>
-  <button data-tab="about">How this works</button>
+  <button data-tab="roster" id="rosterTabBtn" class="hidden">Staff roster</button>
+  <button data-tab="log" id="logTabBtn" class="hidden">Attendance log</button>
+  <button data-tab="about" id="aboutTabBtn" class="hidden">How this works</button>
+  <button id="adminTabBtn">Admin</button>
+  <button id="lockAdminBtn" class="hidden">Lock admin</button>
 </nav>
 
 <main>
@@ -198,8 +201,7 @@
           <div class="cam-status" id="bioStatus"></div>
         </div>
         <div id="pinPanel" class="hidden">
-          <label class="field"><span>Staff ID</span><input type="text" id="pinStaffId"></label>
-          <label class="field"><span>PIN</span><input type="password" id="pinValue" inputmode="numeric" maxlength="6"></label>
+          <label class="field"><span>Enter your PIN</span><input type="password" id="pinValue" inputmode="numeric" maxlength="6" autocomplete="off"></label>
           <button class="btn brass" id="pinVerifyBtn" style="width:100%;">Verify &amp; clock in/out</button>
           <div class="cam-status" id="pinStatus"></div>
         </div>
@@ -256,7 +258,7 @@
 <div class="modal-bg" id="addModalBg">
   <div class="modal">
     <button class="close" id="closeModal">&times;</button>
-    <h2>Add staff member</h2>
+    <h2 id="modalTitle">Add staff member</h2>
     <p class="lead" style="margin-top:4px;">Fill in details, then optionally capture a face reference and register a fingerprint.</p>
     <label class="field"><span>Full name</span><input type="text" id="newName"></label>
     <label class="field"><span>Staff ID</span><input type="text" id="newId" placeholder="e.g. T-014"></label>
@@ -302,9 +304,9 @@
   setInterval(tickClock,1000); tickClock();
 
   /* ---------- tabs ---------- */
-  document.querySelectorAll('nav.tabs button').forEach(btn=>{
+  document.querySelectorAll('nav.tabs button[data-tab]').forEach(btn=>{
     btn.addEventListener('click', ()=>{
-      document.querySelectorAll('nav.tabs button').forEach(b=>b.classList.remove('active'));
+      document.querySelectorAll('nav.tabs button[data-tab]').forEach(b=>b.classList.remove('active'));
       document.querySelectorAll('main .panel').forEach(p=>p.classList.remove('active'));
       btn.classList.add('active');
       $('panel-'+btn.dataset.tab).classList.add('active');
@@ -313,16 +315,65 @@
     });
   });
 
+  /* ---------- admin lock ---------- */
+  let adminUnlocked = false;
+  function renderNav(){
+    ['rosterTabBtn','logTabBtn','aboutTabBtn'].forEach(id=>$(id).classList.toggle('hidden', !adminUnlocked));
+    $('adminTabBtn').classList.toggle('hidden', adminUnlocked);
+    $('lockAdminBtn').classList.toggle('hidden', !adminUnlocked);
+  }
+  async function getSetting(key){
+    const db = await openDB();
+    return new Promise((resolve)=>{
+      const tx = db.transaction('settings','readonly');
+      const req = tx.objectStore('settings').get(key);
+      req.onsuccess = ()=>resolve(req.result ? req.result.value : null);
+      req.onerror = ()=>resolve(null);
+    });
+  }
+  async function setSetting(key,value){
+    const db = await openDB();
+    return new Promise((resolve,reject)=>{
+      const tx = db.transaction('settings','readwrite');
+      tx.objectStore('settings').put({key,value});
+      tx.oncomplete = ()=>resolve();
+      tx.onerror = ()=>reject(tx.error);
+    });
+  }
+  $('adminTabBtn').addEventListener('click', async ()=>{
+    const existing = await getSetting('adminPin');
+    if(!existing){
+      const p1 = prompt('No admin PIN is set yet.\nCreate one now (4+ digits) to protect the roster and log:');
+      if(!p1) return;
+      const p2 = prompt('Confirm admin PIN:');
+      if(p1!==p2){ toast('PINs did not match — try again.', 'err'); return; }
+      await setSetting('adminPin', p1);
+      adminUnlocked = true; renderNav();
+      document.querySelector('[data-tab="roster"]').click();
+      toast('Admin PIN set. Keep it private from staff.', 'ok');
+      return;
+    }
+    const attempt = prompt('Enter admin PIN:');
+    if(attempt===null) return;
+    if(attempt===existing){ adminUnlocked = true; renderNav(); document.querySelector('[data-tab="roster"]').click(); }
+    else toast('Incorrect admin PIN.', 'err');
+  });
+  $('lockAdminBtn').addEventListener('click', ()=>{
+    adminUnlocked = false; renderNav();
+    document.querySelector('[data-tab="checkin"]').click();
+  });
+
   /* ---------- storage helpers (IndexedDB — persists on THIS device only, fully offline) ---------- */
   let _dbPromise = null;
   function openDB(){
     if(_dbPromise) return _dbPromise;
     _dbPromise = new Promise((resolve,reject)=>{
-      const req = indexedDB.open('school-attendance-kiosk', 1);
+      const req = indexedDB.open('school-attendance-kiosk', 2);
       req.onupgradeneeded = (e)=>{
         const db = e.target.result;
         if(!db.objectStoreNames.contains('staff')) db.createObjectStore('staff', {keyPath:'id'});
         if(!db.objectStoreNames.contains('logs')) db.createObjectStore('logs', {keyPath:'logId'});
+        if(!db.objectStoreNames.contains('settings')) db.createObjectStore('settings', {keyPath:'key'});
       };
       req.onsuccess = ()=>resolve(req.result);
       req.onerror = ()=>reject(req.error);
@@ -387,6 +438,7 @@
       await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
       faceModelsReady = true;
       $('faceStatus').textContent = 'Camera ready. Look at the camera to clock in or out.';
+      if(stream) beginScanning();
     }catch(e){
       faceModelsReady = false;
       $('faceStatus').textContent = 'Face recognition unavailable offline right now — use fingerprint or PIN instead.';
@@ -530,17 +582,31 @@
 
   /* ---------- PIN check-in ---------- */
   $('pinVerifyBtn').addEventListener('click', async ()=>{
-    const id = $('pinStaffId').value.trim();
     const pin = $('pinValue').value.trim();
-    const staff = (await listStaff()).find(s=>s.id.toLowerCase()===id.toLowerCase());
-    if(!staff || !staff.pin || staff.pin!==pin){
-      $('pinStatus').textContent = 'Staff ID or PIN not recognized.';
-      $('pinStatus').className='cam-status err'; return;
+    if(!pin){ $('pinStatus').textContent='Enter your PIN.'; $('pinStatus').className='cam-status err'; return; }
+    const matches = (await listStaff()).filter(s=>s.pin && s.pin===pin);
+    if(matches.length===0){
+      $('pinStatus').textContent = 'PIN not recognized.';
+      $('pinStatus').className='cam-status err';
+    } else if(matches.length>1){
+      $('pinStatus').textContent = 'This PIN is shared by more than one staff member — ask an admin to fix it in the roster.';
+      $('pinStatus').className='cam-status err';
+    } else {
+      await clockAction(matches[0], 'PIN');
+      $('pinStatus').textContent = 'Verified.'; $('pinStatus').className='cam-status ok';
     }
-    await clockAction(staff, 'PIN');
-    $('pinStatus').textContent = 'Verified.'; $('pinStatus').className='cam-status ok';
     $('pinValue').value='';
   });
+
+  async function deleteStaff(id){
+    const db = await openDB();
+    return new Promise((resolve,reject)=>{
+      const tx = db.transaction('staff','readwrite');
+      tx.objectStore('staff').delete(id);
+      tx.oncomplete = ()=>resolve();
+      tx.onerror = ()=>reject(tx.error);
+    });
+  }
 
   /* ---------- roster tab ---------- */
   async function renderRoster(){
@@ -558,25 +624,50 @@
         <span class="badge ${s.faceDescriptor?'on':''}">Face</span>
         <span class="badge ${s.credentialId?'on':''}">Fingerprint</span>
         <span class="badge ${s.pin?'on':''}">PIN</span>
+        <button class="btn small secondary editStaffBtn" data-id="${s.id}">Edit</button>
+        <button class="btn small secondary removeStaffBtn" data-id="${s.id}" style="border-color:var(--rust);color:var(--rust);">Remove</button>
       `;
       el.appendChild(li);
     });
+    el.querySelectorAll('.editStaffBtn').forEach(b=>b.addEventListener('click', ()=>openStaffModal(b.dataset.id)));
+    el.querySelectorAll('.removeStaffBtn').forEach(b=>b.addEventListener('click', async ()=>{
+      const s = staff.find(x=>x.id===b.dataset.id);
+      if(confirm(`Remove ${s.name} from the roster? Their past attendance log entries are kept.`)){
+        await deleteStaff(b.dataset.id);
+        toast(s.name + ' removed.', 'ok');
+        renderRoster();
+      }
+    }));
   }
 
   /* ---------- add staff modal ---------- */
-  let regStream=null, capturedPhoto=null, capturedDescriptor=null, capturedCredentialId=null;
-  $('addStaffBtn').addEventListener('click', async ()=>{
+  let regStream=null, capturedPhoto=null, capturedDescriptor=null, capturedCredentialId=null, editingStaffId=null;
+  async function openStaffModal(id){
+    editingStaffId = id || null;
     $('addModalBg').classList.add('show');
-    $('newName').value=''; $('newId').value=''; $('newDept').value=''; $('newPin').value='';
-    $('regPreview').style.display='none'; capturedPhoto=null; capturedDescriptor=null; capturedCredentialId=null;
-    $('regStatus').textContent='';
+    $('regPreview').style.display='none'; $('regStatus').textContent='';
+    let existing = null;
+    if(id){ existing = (await listStaff()).find(s=>s.id===id); }
+    $('modalTitle').textContent = existing ? 'Edit staff member' : 'Add staff member';
+    $('newName').value = existing ? existing.name : '';
+    $('newId').value = existing ? existing.id : '';
+    $('newId').disabled = !!existing;
+    $('newDept').value = existing ? (existing.department||'') : '';
+    $('newPin').value = existing ? (existing.pin||'') : '';
+    capturedPhoto = existing ? existing.photo : null;
+    capturedDescriptor = existing ? existing.faceDescriptor : null;
+    capturedCredentialId = existing ? existing.credentialId : null;
+    if(capturedPhoto){ $('regPreview').src = capturedPhoto; $('regPreview').style.display='block'; }
     try{
       regStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'user'}});
       $('regVideo').srcObject = regStream;
-    }catch(e){ $('regStatus').textContent='Camera unavailable — you can still save without a face reference.'; }
-  });
+    }catch(e){ $('regStatus').textContent='Camera unavailable — you can still save without recapturing a face.'; }
+  }
+  $('addStaffBtn').addEventListener('click', ()=>openStaffModal(null));
   function closeAddModal(){
     $('addModalBg').classList.remove('show');
+    $('newId').disabled = false;
+    editingStaffId = null;
     if(regStream){ regStream.getTracks().forEach(t=>t.stop()); regStream=null; }
   }
   $('closeModal').addEventListener('click', closeAddModal);
@@ -630,14 +721,20 @@
     const dept = $('newDept').value.trim();
     const pin = $('newPin').value.trim();
     if(!name || !id){ toast('Name and Staff ID are required.', 'err'); return; }
-    const existing = (await listStaff()).find(s=>s.id.toLowerCase()===id.toLowerCase());
-    if(existing){ toast('That Staff ID already exists.', 'err'); return; }
+    const roster = await listStaff();
+    if(!editingStaffId){
+      const existing = roster.find(s=>s.id.toLowerCase()===id.toLowerCase());
+      if(existing){ toast('That Staff ID already exists.', 'err'); return; }
+    }
+    if(pin && roster.some(s=>s.pin===pin && s.id!==editingStaffId)){
+      toast('That PIN is already used by another staff member — pick a different one.', 'err'); return;
+    }
     await saveStaff({
-      id, name, department:dept, pin: pin||null,
+      id: editingStaffId || id, name, department:dept, pin: pin||null,
       photo: capturedPhoto, faceDescriptor: capturedDescriptor,
       credentialId: capturedCredentialId
     });
-    toast(name + ' added to the roster.', 'ok');
+    toast(name + (editingStaffId ? ' updated.' : ' added to the roster.'), 'ok');
     closeAddModal();
     renderRoster();
   });
@@ -690,6 +787,7 @@
   });
 
   /* ---------- init ---------- */
+  renderNav();
   renderRecent();
   startCamera();
 })();
